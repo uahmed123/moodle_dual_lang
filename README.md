@@ -9,14 +9,14 @@ primarily written to test the support for custom string managers in the Moodle c
 
 1. Install this plugin
 
-    $ cd /path/to/your/moodle/dirroot
-    $ cd local
-    $ git clone https://github.com/mudrd8mz/moodle-local_stringman.git stringman
+        $ cd /path/to/your/moodle/dirroot
+        $ cd local
+        $ git clone https://github.com/mudrd8mz/moodle-local_stringman.git stringman
 
 2. Edit your main `config.php` and add the following line there. Of course, you have to add this line before the `setup.php` is
    included at the end of the file.
 
-   $CFG->customstringmanager = '\local_stringman\dummy_string_manager';
+        $CFG->customstringmanager = '\local_stringman\dummy_string_manager';
 
 3. Check that all texts normally displayed by `get_string()` are now replaced with some dummy information like `{login//core}`.
 
