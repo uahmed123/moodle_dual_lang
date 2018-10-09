@@ -1,0 +1,124 @@
+pipeline {
+    agent { label 'master' }
+        environment {
+                MOODLE_UPDATE_DIR = '/moodle_storage/moodle_update' //directory on GFS2
+                MOODLE_DIR = '/var/www/html/moodle' //directory on application server
+        }
+        parameters {
+             choice(choices: ['PREPROD', 'PROD'], description: 'Select Target Environment', name: 'Environment')
+        }
+    stages {
+        stage ('Set Environment') {
+            steps {
+                script {
+                    if (env.Environment == 'PREPROD') {
+                        env.MOODLE_SERVER1 = '10.168.3.205'
+                        env.MOODLE_SERVER2 = '10.168.1.159'
+                        env.CONFIG_FILE = 'pre-config.php'
+                        env.KEY_NAME = 'seta-nonprod'
+                    } else {
+                        env.MOODLE_SERVER1 = '10.168.11.145'
+                        env.MOODLE_SERVER1 = '10.168.11.182'
+                        env.CONFIG_FILE = 'prod-config.php'
+                        env.KEY_NAME = 'seta-prod'
+                    }
+                }
+            }
+        }
+        stage('Enable Maintenance Mode') {
+            steps {
+                withCredentials ([sshUserPrivateKey(credentialsId: env.KEY_NAME, keyFileVariable: 'deploykey')]) {
+                    //pulling latest changes
+                    script {
+                        // only pull latest changes if Environment is preprod. since prod and preprod share the same update directory.
+                        if (env.Environment == 'PREPROD') {
+                            sh "ssh -i $deploykey -o StrictHostKeyChecking=no ec2-user@${MOODLE_SERVER1} 'sudo -u apache git -C ${MOODLE_UPDATE_DIR}/moodle pull origin production'"
+                        }
+                    }
+                    //enabling manitenance mode
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache /usr/bin/php ${MOODLE_DIR}/admin/cli/maintenance.php --enable'"
+                }
+            }
+        }
+        stage('Deploy Moodle1') {
+            steps {
+                withCredentials ([sshUserPrivateKey(credentialsId: env.KEY_NAME, keyFileVariable: 'deploykey')]) {
+                    //overwrite old files on server with new ones from gluster
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache rsync -av --delete ${MOODLE_UPDATE_DIR}/moodle ${MOODLE_DIR}'"
+
+                    //remove unneeded configuration files
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache rm -rf ${MOODLE_DIR}/config_* && sudo -u apache rm -rf ${MOODLE_DIR}/config-* && sudo -u apache rm -rf ${MOODLE_DIR}/.git && sudo -u apache rm -rf ${MOODLE_DIR}/local/codechecker || true'"
+
+                    //copy config.php file from moodle to server
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache cp ${MOODLE_UPDATE_DIR}/${CONFIG_FILE} ${MOODLE_DIR}/config.php'"
+
+                    //change ownership of files and directories to restricted
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache chown -R apache:apache ${MOODLE_DIR}'"
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo find ${MOODLE_DIR} -type d -exec chmod 750 {} \\;'"
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo find ${MOODLE_DIR} -type f -exec chmod 640 {} \\;'"
+                }
+            }
+        }
+        stage('Update Moodle1') {
+            steps {
+                withCredentials ([sshUserPrivateKey(credentialsId: env.KEY_NAME, keyFileVariable: 'deploykey')]) {
+                    //updating php application with --lang flag to avoid language errors
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache /usr/bin/php ${MOODLE_DIR}/admin/cli/upgrade.php --lang=en_us --non-interactive'"
+
+                    //removing cache
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache rm -rf /var/www/moodle_local_cache/*'"
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER1} 'sudo -u apache /usr/bin/php ${MOODLE_DIR}/admin/cli/purge_caches.php'"
+                    echo "Upgrade Complete on Moodle Server 1"
+                }
+            }
+        }
+        stage('Deploy Moodle2') {
+            steps {
+                withCredentials ([sshUserPrivateKey(credentialsId: env.KEY_NAME, keyFileVariable: 'deploykey')]) {
+                    //overwrite old files on server with new ones from gluster
+                    sh "ssh -i $deploykey -o StrictHostKeyChecking=no ec2-user@${MOODLE_SERVER2} 'sudo -u apache rsync -av --delete ${MOODLE_UPDATE_DIR}/moodle ${MOODLE_DIR}'"
+
+                    //remove unneeded configuration files
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo -u apache rm -rf ${MOODLE_DIR}/config_* && sudo -u apache rm -rf ${MOODLE_DIR}/config-* && sudo -u apache rm -rf ${MOODLE_DIR}/.git && sudo -u apache rm -rf ${MOODLE_DIR}/local/codechecker || true'"
+
+                    //copy config.php file from moodle to server
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo -u apache cp ${MOODLE_UPDATE_DIR}/${CONFIG_FILE} ${MOODLE_DIR}/config.php'"
+
+                    //change ownership of files and directories to restricted
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo -u apache chown -R apache:apache ${MOODLE_DIR}'"
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo find ${MOODLE_DIR} -type d -exec chmod 750 {} \\;'"
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo find ${MOODLE_DIR} -type f -exec chmod 640 {} \\;'"
+                }
+            }
+        }
+        stage('Update Moodle2') {
+            steps {
+                withCredentials ([sshUserPrivateKey(credentialsId: env.KEY_NAME, keyFileVariable: 'deploykey')]) {
+                    //updating php application with --lang flag to avoid language errors
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo -u apache /usr/bin/php ${MOODLE_DIR}/admin/cli/upgrade.php --lang=en_us --non-interactive'"
+
+                    //removing cache
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo -u apache rm -rf /var/www/moodle_local_cache/*'"
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo -u apache /usr/bin/php ${MOODLE_DIR}/admin/cli/purge_caches.php'"
+                }
+            }
+        }
+        stage('Disable Maintenance Mode') {
+            steps {
+                withCredentials ([sshUserPrivateKey(credentialsId: env.KEY_NAME, keyFileVariable: 'deploykey')]) {
+                    //disabling maintenance mode
+                    sh "ssh -i $deploykey ec2-user@${MOODLE_SERVER2} 'sudo -u apache /usr/bin/php ${MOODLE_DIR}/admin/cli/maintenance.php --disable'"
+                    echo "Upgrade complete on Moodle Server 2"
+                }
+            }
+        }
+    }
+    post {
+        success {
+            mail body: "Deploy ${env.BUILD_DISPLAY_NAME} succeeded for '${env.Environment}'.\nSee ${env.BUILD_URL}", subject: "Deployment pipeline Success: ${env.Environment}", to: "umer@gmail.com";
+        }
+        failure {
+            mail body: "Deploy ${env.BUILD_DISPLAY_NAME} failed for branch '${env.Environment}'.\nSee ${env.BUILD_URL}", subject: "Deployment pipeline Failure: ${env.Environment}", to: "umer@gmail.com";
+        }
+    }
+}
