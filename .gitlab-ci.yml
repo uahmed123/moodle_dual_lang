@@ -1,0 +1,649 @@
+#======================================================================================================================================#
+# These are the general variables that are set globally unless the job explicitly overwrites them                                      #
+# NOTE!! If you call "variables:" for instance in a job you will have to set all variables you need again; so use export when possible #
+#======================================================================================================================================#
+variables:
+  APACHE_WEB_ROOT: "${CI_PROJECT_DIR}"
+  MYSQL_ROOT_PASSWORD: "m@0dl3ing"
+  MYSQL_USER: moodle
+  MYSQL_PASSWORD: "m@0dl3ing"
+  MYSQL_DATABASE: moodle
+  COMPOSER_CACHE_DIR: ".cache/composer"
+  HTTP_PROXY: "http://10.168.1.114:3128"
+  FTP_PROXY: "http://10.168.1.114:3128"
+  HTTPS_PROXY: "http://10.168.1.114:3128"
+  NO_PROXY: "webserver,selenium1,selenium2,selenium3,10.168.1.114,10.168.2.132,localhost,127.0.0.1,.ice.dhs.gov,10.168.2.253,gitlabnonprod.sevismod.ice.dhs.gov"
+  GITLAB_M_DOCKER: "/home/gitlab-runner/docker-moodle"
+  DOCKER_DRIVER: overlay2
+  RMT_DBG_ADDR: "127.0.0.1"
+  #for firefox nightly/weekly
+  #for the docker in docker image
+  MOODLE_DOCKER_WWWROOT: "${CI_PROJECT_DIR}"
+  MOODLE_DOCKER_PHP_VERSION: "7.1"
+  MOODLE_DOCKER_BROWSER: "firefox"
+  MOODLE_DOCKER_DB: "mysql"
+  #SE_OPTS: "-debug "
+  NUM_OF_SELENIUMS: "3"
+  TOTAL_RUNS: "3"
+  #LOG_LOC: "${CI_PROJECT_DIR}/selenium.log"
+#=====================================================================================#
+# We have nightly, even though it will not run unless, triggered or scheduled.        #
+# This allows us to ensure nightly jobs don't run parallel like normal per push jobs  #
+# This prevents us from running out of resources or over taxing the servers.          #
+#=====================================================================================#
+stages:
+  - lint
+  - test
+  - regression
+  - nightly_chrome
+  - nightly_firefox
+  - deploy
+  - scans
+  - github_update
+  - notification
+#=========================================#
+# used to cache composer, so it's quicker #
+#=========================================#
+cache:
+  key: "$CI_JOB_NAME"
+  paths:
+  - vendor/
+  - .cache
+#================================================================#
+# General use before script, will run unless over written by job #
+#================================================================#
+before_script:
+    - curl -x 10.168.1.114:3128 -SsO https://getcomposer.org/download/1.6.3/composer.phar
+#==============================================================================================================================#
+# These are the definitions they do not execute. These are the anchors for implemenations further down                         #
+#==============================================================================================================================#
+.chrome: &chrome_definition
+  artifacts:
+    when: always
+    name: "chrome"
+    paths:
+      - chrome/
+    expire_in: 2 days
+  script:
+    - mkdir -p results/behat_chrome/junit
+    #- curl -x 10.168.1.114:3128 -s http://getcomposer.org/installer | php
+    - curl -x 10.168.1.114:3128 -SsO https://getcomposer.org/download/1.6.3/composer.phar
+    - /usr/bin/sudo service apache2 start
+    - sleep 20
+    #this is so we can get at the data later
+    #copy over needed items
+    - cp config_MOODLE_34_DOCKER_CHROME.php config.php
+    - php composer.phar require --ansi --no-progress --dev dmore/behat-chrome-extension
+    - php composer.phar require --ansi --no-progress --dev dmore/chrome-mink-driver:"^2.6.1"
+    # Install composer dependencies #update --prefer-dist --no-interaction
+    - php composer.phar install -o --ansi --no-progress;
+    #we are not running parrellel but we want that .yml file this step generates. we also don't want to install DB
+    - php admin/tool/behat/cli/init.php -a=seta_boost -o=true -j=${TOTAL_RUNS} --fromrun=${RUN} --torun=${RUN};
+    #running it this way, because all we want is the yml config
+    - php admin/tool/behat/cli/run.php
+        --colors
+        --tags=${TAGS_EXPORT}
+        --format=pretty
+        --out=${CI_PROJECT_DIR}/results/behat_chrome/pretty_${RUN}.txt
+        --format=moodle_progress
+        --out=std
+        --suite=seta_boost
+        --fromrun=${RUN}
+        --torun=${RUN}
+        --auto-rerun
+  # have to use image custom built to have chrome and apache running on it, other wise this will fail, until gitlab fixes image linking
+  #next step is to update this.
+  services:
+    - caperneoignis/mysql:5.7
+  after_script:
+    - mkdir chrome/
+    - cp chrome.log chrome/
+    - cp -R results/ chrome/
+    - cp -R /var/www/behatfaildumps/ chrome/
+.firefox: &firefox_definition
+    artifacts:
+      when: always
+      name: "firefox"
+      paths:
+        - firefox/
+      expire_in: 2 days
+    script:
+      #we need the docker compose script, so we need to download it to the image
+      - git clone http://${GITLAB_USER}:${GITLAB_PASS}@gitlabnonprod.sevismod.ice.dhs.gov/seta/docker-moodle.git
+      - chmod -R +x docker-moodle/bin
+      - mkdir -p ${MOODLE_DOCKER_WWWROOT}/results/behat_firefox/junit
+      #copy over needed items
+      - cp docker-moodle/config.docker-template.php $MOODLE_DOCKER_WWWROOT/config.php
+      #only works because base user in image is root. We need to ensure server is running, since this goes in as a command scripts
+      # Install composer dependencies #update --prefer-dist --no-interaction
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} up -d
+      #we need to remove the copy that was injested by the docker image. this is to prevent moodle from picking up the config that is inside that directory
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} exec -T webserver curl -OsS https://getcomposer.org/composer.phar;
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} exec -T webserver php composer.phar install -o --ansi --no-progress;
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} exec -T webserver chmod -R 777 /var/www/html
+      #$((RUN+2))
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} exec -T webserver php admin/tool/behat/cli/init.php
+          -a=seta_boost
+          -j=${TOTAL_RUNS}
+          --fromrun=${RUN}
+          --torun=${TO_RUN};
+      #for some reason the test ran only if we call curl, I don't know why, but that is the only way it works.
+      #so apperantly there is now a different way to run behat test..... --format=moodle_stepcount --format=moodle_progress
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} exec -T webserver php admin/tool/behat/cli/run.php
+          --colors
+          --tags=${TAGS_EXPORT}
+          --format=pretty
+          --out=/var/www/html/results/behat_firefox/pretty_${RUN}.txt
+          --format=moodle_progress
+          --out=std
+          --fromrun=${RUN}
+          --torun=${TO_RUN}
+          --suite=seta_boost;
+    # have to use image custom built to have chrome and apache running on it, other wise this will fail, until gitlab fixes image linking
+    after_script:
+      # now get the faildumps and write them to the results directory so we can delete afterwards
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} exec -T webserver cp -R /var/www/behatfaildumps /var/www/html/results/
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} exec -T webserver chmod -R 777 /var/www/html
+      - docker-moodle/bin/moodle-docker-compose -p=${CI_JOB_ID} down -v
+      - mkdir -p ${APACHE_WEB_ROOT}/firefox/
+      - cp -R ${APACHE_WEB_ROOT}/results/ ${APACHE_WEB_ROOT}/firefox/
+#==================================================================#
+# Nightly Definitions Hooks at the bootom                          #
+#==================================================================#
+.nightly_chrome: &chrome_nightly_definition
+  <<: *chrome_definition
+  #we don't want this messing up merges right now, until we fix all the issues
+  allow_failure: true
+  #this is a hack to get chrome to run before firefox.
+  stage: nightly_chrome
+  only:
+    - schedules
+    - triggers
+.nightly_firefox: &firefox_nightly
+  <<: *firefox_definition
+  allow_failure: true
+  stage: nightly_firefox
+  only:
+    - schedules
+    - triggers
+#==================================================================#
+# Deploy Anchors, definitions at the bottom                        #
+#==================================================================#
+.deploy_template: &deploy_definition
+#we want the workspace free of any leftovers so we use clone to ensure we have cleaned everything out.
+  stage: deploy
+  before_script:
+  #had to add this because this is not imported from the outside.
+    - export HTTP_PROXY=http://10.168.1.114:3128;
+    - export FTP_PROXY=http://10.168.1.114:3128;
+    - export HTTPS_PROXY=http://10.168.1.114:3128;
+    - export NO_PROXY="10.168.2.132,127.0.0.1,github.ice.dhs.gov,*.ice.dhs.gov,gitlabnonprod.sevismod.ice.dhs.gov";
+    - echo "Starting deployment"
+  after_script:
+    - echo "All done"
+  except:
+    - schedules
+    - triggers
+.non_prod_script:
+  script: &deploy_non_prod
+    #had issue with this going bonkers in http
+    - cp /home/gitlab-runner/config.php ${CI_PROJECT_DIR}/config.php
+    - rsync -av --delete ${CI_PROJECT_DIR}/ /var/www/html/moodle
+    - chown -R gitlab-runner:apache /var/www/html/moodle/
+    #remove code checker we don't want it
+    - rm -rf /var/www/html/moodle/local/codechecker
+    - /usr/bin/php /var/www/html/moodle/admin/cli/maintenance.php --enable
+    - /usr/bin/php /var/www/html/moodle/admin/cli/upgrade.php --lang=en --non-interactive
+    - /usr/bin/php /var/www/html/moodle/admin/cli/purge_caches.php
+    - /usr/bin/php /var/www/html/moodle/admin/cli/maintenance.php --disable
+#=================================================================#
+#This was moved up here so we can test both 7.2 and 7.1 unit test #
+#=================================================================#
+.phpunit: &code_coverage
+  stage: test
+  artifacts:
+    when: always
+    name: "phpunit"
+    paths:
+      - phpunit/
+    expire_in: 2 days
+  script:
+    - mkdir -p results/phpunit/
+    - mkdir -p results/cov/
+   #copy over needed items
+    - cp config_MOODLE_34_DOCKER.php config.php
+    #may need to drop coveralls since we may not be able to use it
+    - php composer.phar require --ansi --no-progress --dev phpunit/phpcov:"^4.0.5"
+    - php composer.phar require --ansi --no-progress --dev theseer/fdomdocument:"^1.6.6"
+    # Install composer dependencies #update --prefer-dist --no-interaction
+    - php composer.phar install -o --ansi --no-progress;
+    #now redo the sonarqube thing to allow us to do an absolute lookup
+    - php admin/tool/phpunit/cli/init.php;
+    #now build component configs, will be used after find command.
+    - php admin/tool/phpunit/cli/util.php --buildcomponentconfigs;
+    #find all directories matching our search
+    - seta_directories=$( find ${CI_PROJECT_DIR} -path ${CI_PROJECT_DIR}/theme -prune -o -type d \( -name seta* -o -name sevis* \)  -print );
+    #this goes in as a one liner, so be sure to treat loops as one liners
+    - for dir in $seta_directories;
+        do
+          fileName=$(basename ${dir});
+          echo "Running test in ${dir}";
+          if [ -e "${dir}/phpunit.xml" ]; then
+              vendor/bin/phpunit -c ${dir}/phpunit.xml
+                 --colors
+                 --log-junit results/phpunit/junit-${fileName}.xml
+                 --coverage-php results/cov/coverage-${fileName}.cov;
+              else
+                echo "No phpunit.xml file present in ${dir}";
+          fi
+        done
+    # now we want to merge the above code coverage reports to clover and print for our use.
+    - php vendor/bin/phpcov merge results/cov/
+       --clover results/phpunit/coverage.xml
+       --text;
+    # now combine junit test
+    - php merge-phpunit-xml results/phpunit/ results/phpunit/results.xml
+  tags:
+    - docker
+  #next step is to update this.
+  services:
+     - caperneoignis/mysql:5.7
+    #look at this later.
+  after_script:
+    - mkdir phpunit/
+    - cp -R results/ phpunit/
+#==============================================================================================================================#
+# These are normal scripts minus any anchors. I put them in the middle so you wouldn't have to scroll down                     #
+#==============================================================================================================================#
+phplint:code_lint:
+  variables:
+    COMPOSER_CACHE_DIR: ".cache/composer_lint"
+  stage: lint
+  script:
+    - mkdir -p results/
+    - cp config_MOODLE_34_DOCKER.php config.php
+    - php composer.phar require --ansi --no-progress overtrue/phplint:"0.2.4"
+    - php composer.phar install -o --ansi --no-progress;
+    #find all directories matching our search
+    - seta_directories=$( find ${CI_PROJECT_DIR} -type d \( -name seta* -o -name sevis* \) | paste --delimiters=' ' -s);
+    - php vendor/bin/phplint --no-interaction --ansi ${seta_directories};
+  after_script:
+    - rm composer.json && rm composer.lock
+  tags:
+    - docker
+  image: "caperneoignis/moodle-php-apache:7.1"
+  #next step is to update this.
+  services:
+    - caperneoignis/mysql:5.7
+phpqc:code_QC:
+  stage: test
+  artifacts:
+    when: always
+    name: "phpqc"
+    paths:
+      - phpqc/
+    expire_in: 2 days
+  script:
+    - mkdir -p results/phpqc/
+   #copy over needed items
+    - cp config_MOODLE_34_DOCKER.php config.php
+    - php composer.phar install -o --ansi --no-progress;
+    - vendor/bin/phpcs --config-set show_progress 1
+    #find all directories matching our search
+    - seta_directories=$( find ${CI_PROJECT_DIR} -type d \( -name seta* -o -name sevis* \) | paste --delimiters=' ' -s);
+    - vendor/bin/phpcs
+       -s -n
+       --colors
+       --ignore=*.js,*/font/*,fpdf.php,pdf_export.php
+       --report-full=results/phpqc/full.txt
+       --report-gitblame=results/phpqc/blame.txt
+       --report-source=results/phpqc/source.txt
+       --standard=${CI_PROJECT_DIR}/local/codechecker/moodle
+       --report=summary
+       ${seta_directories};
+  tags:
+    - docker
+  image: "caperneoignis/moodle-php-apache:7.1"
+  #next step is to update this.
+  services:
+    - caperneoignis/mysql:5.7
+    #look at this later.
+  after_script:
+    - mkdir phpqc/
+    - cp -R results/ phpqc/
+docs:
+  artifacts:
+    when: always
+    name: "docs"
+    paths:
+    - public/
+    expire_in: 2 days
+  stage: test
+  script:
+    - mkdir .public
+    - cp config_MOODLE_34_DOCKER.php config.php
+    #we don't need other composer stuff just this.
+    - rm -rf composer.json && rm -rf composer.lock && rm -rf vendor/
+    - php composer.phar require --ansi --no-progress --dev phpdocumentor/phpdocumentor:2.9
+    - php composer.phar install -o --ansi --no-progress;
+    # we can import WIKIs but can't really convert them to HTML.
+    - git clone http://${GITLAB_USER}:${GITLAB_PASS}@gitlabnonprod.sevismod.ice.dhs.gov/seta/wiki.git
+    - wget --output-document="wiki/uploads/coverage.svg" http://gitlabnonprod.sevismod.ice.dhs.gov/seta/moodle/badges/seta_master/coverage.svg?private_token=${GITLAB_APIKEY}
+    - wget --output-document="wiki/uploads/build.svg" http://gitlabnonprod.sevismod.ice.dhs.gov/seta/moodle/badges/seta_master/build.svg?private_token=${GITLAB_APIKEY}
+    - git clone http://${GITLAB_USER}:${GITLAB_PASS}@gitlabnonprod.sevismod.ice.dhs.gov/seta/phpdoc_template.git vendor/phpdocumentor/phpdocumentor/data/templates/phpdoc_template
+    #we want to go through and convert all the mark down files, then we want to remove those files after getting done.
+    - wikiPages=$(find wiki -name '*.md' -type f | paste --delimiters=' ' -s);
+    - transformerText="";
+    #have to put escaped characters into regex or sed will throw an error, the follow vars are commands for sed
+    - stringToRemove='s/<!DOCTYPE.html.PUBLIC."-\/\/W3C\/\/DTD.XHTML.1\.0.Transitional\/\/EN"."http:\/\/www\.w3\.org\/TR\/xhtml1\/DTD\/xhtml1-transitional\.dtd">//g';
+    - headContentRemove='/<head>/,/<\/head>/d';
+    - bodyTagRemove='s/<[^>]*body>//g';
+    - htmlTagRemove='s/<\/html>//g;s/<html.xmlns="http:\/\/www\.w3\.org\/1999\/xhtml">//g';
+    #stuff to add to html files so they are readable.
+    - htmlTagToAdd='<div class="span8 content">';
+    - fileAddtion="{% extends 'layout.html.twig' %}\n{% block content %}\n{% raw %}\n${htmlTagToAdd}\n";
+    - afterContentAdd="</div>\n{% endraw %}\n{% endblock %}\n";
+    #we need to get ride of the head and body tags, while leaving the body content alone. and add twig template items
+    - for i in $wikiPages;
+       do
+         name=$(echo $i | cut -f 1 -d '.')
+         && pandoc -f markdown -t html -s "$i" > "$name".html
+         && sed -i ''${headContentRemove}';'${bodyTagRemove}';'${htmlTagRemove}';'${stringToRemove}'' "$name".html
+         && echo -e "${fileAddtion}$(cat "$name".html)\n${afterContentAdd}" > "$name".html.twig
+         && rm -f "$i"
+         && transformerText='<transformation writer="twig" source="templates/phpdoc_template/'${name}'.html.twig" artifact="'${name}'.html"/> '${transformerText};
+       done;
+    - sed -i "s#%%transform%%#${transformerText}#" vendor/phpdocumentor/phpdocumentor/data/templates/phpdoc_template/template.xml
+    - mkdir -p vendor/phpdocumentor/phpdocumentor/data/templates/phpdoc_template/wiki
+    - cp -R wiki/* vendor/phpdocumentor/phpdocumentor/data/templates/phpdoc_template/wiki/
+    - seta_directories=$( find ${CI_PROJECT_DIR} -type d \( -name seta* -o -name sevis* \) | paste --delimiters=',' -s);
+    - vendor/bin/phpdoc project:run -t .public/ -d ${seta_directories} -c phpdoc.xml
+    - mv .public public
+  tags:
+    - docker
+  image: "caperneoignis/moodle-php-apache:7.0_pandoc"
+  only:
+    - develop
+  except:
+    - schedules
+    - triggers
+sonar:
+    stage: scans
+    before_script:
+      - echo "starting test."
+    script:
+      #need to replace file directories so sonar can find file locations.
+      - sed -i "s#/builds/seta/moodle#${CI_PROJECT_DIR}#" phpunit/results/phpunit/results.xml
+      - sed -i "s#/builds/seta/moodle#${CI_PROJECT_DIR}#" phpunit/results/phpunit/coverage.xml
+      - /home/gitlab-runner/sonar-runner/bin/sonar-runner;
+    tags:
+      - php_unit
+    dependencies:
+      - behat:chrome_7.1
+      - phpunit:7.1
+    only:
+      - develop
+push_to_github:
+#we want the workspace free of any leftovers so we use clone to ensure we have cleaned everything out.
+    variables:
+      GIT_STRATEGY: none
+    stage: github_update
+    before_script:
+    #had to add this because this is not imported from the outside.
+      - export HTTP_PROXY=http://10.168.1.114:3128;
+      - export FTP_PROXY=http://10.168.1.114:3128;
+      - export HTTPS_PROXY=http://10.168.1.114:3128;
+      - export NO_PROXY="10.168.2.132,127.0.0.1,github.ice.dhs.gov,*.ice.dhs.gov";
+      #we want this to ignore the cert signer.
+      - git config --global http.sslVerify "false"
+      #need to remove old repo, just in case we are running on same machine.
+      - rm -rf moodle || true
+      - echo "pushing to GitHub"
+    script:
+      - git clone http://${GITLAB_USER}:${GITLAB_PASS}@gitlabnonprod.sevismod.ice.dhs.gov/seta/moodle.git
+      #need to move into git repo.
+      - cd moodle/
+      - remote=origin ; for brname in `git branch -r | grep origin | grep -v develop | grep -v HEAD | sed -e 's/^[^\/]*\///'`; do git branch --track $brname  $remote/$brname ; done
+      - git remote add upstream  https://${GITHUB_USER}:${GITHUB_APIKEY}@github.ice.dhs.gov/HSI/moodle.git
+      - git push -u upstream --all
+      - git push --tags upstream
+    after_script:
+      - echo "All done";
+    tags:
+      - php
+    except:
+      - schedules
+      - triggers
+#====================================================#
+# Deploy scripts referencing the anchors above       #
+#====================================================#
+deploy_staging:
+    <<: *deploy_definition
+    variables:
+      GIT_STRATEGY: clone
+    script:
+      - /home/gitlab-runner/githubProdAddition.sh
+      #push seta_master code to github's master branch
+      - git push github HEAD:master;
+    environment:
+      name: staging
+      url: http://10.168.2.187/
+    tags:
+      - php
+    only:
+      - SETA_1_0
+deploy_uat:
+  <<: *deploy_definition
+  script: *deploy_non_prod
+  environment:
+    name: UAT
+    url: http://10.168.2.187/
+  tags:
+    - dev_uat,uat
+  only:
+    - seta_master
+deploy_dev:
+  <<: *deploy_definition
+  script: *deploy_non_prod
+  environment:
+    name: development
+    url: http://10.168.2.175/moodle/
+  tags:
+    - dev_deploy,dev
+  only:
+    - develop
+pages:
+  <<: *deploy_definition
+  script:
+    - rsync -av --delete ${CI_PROJECT_DIR}/public/ /var/www/html/docs
+    - chown -R gitlab-runner:apache /var/www/html/docs/
+    - JOB_STATUS="Passed";
+  environment:
+    name: documentation
+    url: http://10.168.2.175/docs/
+  dependencies:
+    - docs
+  tags:
+    - dev_deploy,dev
+  only:
+    - develop
+  except:
+    - schedules
+    - triggers
+#==============================================================================================================================#
+# These are the actual job definitions using the anchors from above                                                            #
+#==============================================================================================================================#
+phpunit:7.1:
+  <<: *code_coverage
+  image: "caperneoignis/moodle-php-apache:7.1_xdebug"
+phpunit:7.2:
+  <<: *code_coverage
+  image: "caperneoignis/moodle-php-apache:7.2_xdebug"
+#one behat job is running php 71 and the other 72
+behat:chrome_7.1:
+  <<: *chrome_definition
+  stage: regression
+  before_script:
+    - export TAGS_EXPORT="~@notesting&&@seta"
+    - export RUN=1;
+    - export TOTAL_RUNS=1;
+  except:
+    - schedules
+    - triggers
+  image: "caperneoignis/chrome-headless-browser:latest_apache_71"
+  tags:
+    - regression
+behat:chrome_7.2:
+  <<: *chrome_definition
+  stage: regression
+  before_script:
+    - export TAGS_EXPORT="~@notesting&&@seta"
+    - export RUN=1;
+    - export TOTAL_RUNS=1;
+  except:
+    - schedules
+    - triggers
+  image: "caperneoignis/chrome-headless-browser:latest_apache_72"
+  tags:
+    - regression
+#normal firefox run, but since there is only a small difference, we use firefox as the export.
+behat:firefox:
+    <<: *firefox_definition
+    stage: regression
+    allow_failure: true
+    before_script:
+      - export TOTAL_RUNS=3;
+      - export RUN=1;
+      - export TO_RUN=${TOTAL_RUN};
+      - export TAGS_EXPORT="~@notesting&&@seta"
+    when: manual
+    except:
+      - schedules
+      - triggers
+    tags:
+       - behat
+#================================================================#
+# nightly for chrome                                             #
+#================================================================#
+run1:
+  <<: *chrome_nightly_definition
+  before_script:
+    - export TOTAL_RUNS=4
+    - export RUN=1
+    - export TAGS_EXPORT="~@_alert"
+  image: "caperneoignis/chrome-headless-browser:latest_apache_71"
+  tags:
+    - docker1
+run2:
+  <<: *chrome_nightly_definition
+  before_script:
+    - export TOTAL_RUNS=4
+    - export RUN=2
+    - export TAGS_EXPORT="~@_alert"
+  image: "caperneoignis/chrome-headless-browser:latest_apache_71"
+  tags:
+    - docker2
+run3:
+  <<: *chrome_nightly_definition
+  before_script:
+    - export TOTAL_RUNS=4
+    - export RUN=3
+    - export TAGS_EXPORT="~@_alert"
+  image: "caperneoignis/chrome-headless-browser:latest_apache_71"
+  tags:
+    - docker1
+run4:
+  <<: *chrome_nightly_definition
+  before_script:
+    - export TOTAL_RUNS=4
+    - export RUN=4
+    - export TAGS_EXPORT="~@_alert"
+  image: "caperneoignis/chrome-headless-browser:latest_apache_71"
+  tags:
+    - docker2
+#===================================================================#
+# nightly for firefox                                               #
+#===================================================================#
+firefox1:
+  <<: *firefox_nightly
+  before_script:
+    - export RUN=1
+    - export TAGS_EXPORT="~@notesting&&@seta"
+    - export TO_RUN=$((RUN+1));
+  tags:
+    - behat
+firefox2:
+  <<: *firefox_nightly
+  before_script:
+    - export RUN=3
+    - export TAGS_EXPORT="~@notesting&&@seta"
+    - export TO_RUN=$((RUN+1));
+  tags:
+    - behat
+.firefox3:
+  <<: *firefox_nightly
+  before_script:
+     - export RUN=7
+     - export TAGS_EXPORT="~@notesting&&@seta"
+     - export TO_RUN=$((RUN+2));
+  tags:
+    - behat
+.firefox4:
+  <<: *firefox_nightly
+  before_script:
+    - export RUN=10
+    - export TAGS_EXPORT="~@notesting&&@seta"
+    - export TO_RUN=$((RUN+2));
+  tags:
+    - behat
+#=============================================#
+# Notification to all through slack channel   #
+#=============================================#
+.notify_build: &notify
+  stage: notification
+  allow_failure: true
+  cache:
+    untracked: true
+  artifacts:
+    untracked: true
+  variables:
+    GIT_STRATEGY: none
+  before_script:
+    - echo "Starting notification"
+    - export header_txt="This is a message from the pipeline"
+    - export additional_txt="\nThis is posted by the pipeline in *Gitlab*"
+    - export pipeline_txt='Pipeline <http://gitlabnonprod.sevismod.ice.dhs.gov/seta/moodle/pipelines/'${CI_PIPELINE_ID}'|'${CI_PIPELINE_ID}'>'
+    - export fall_back_txt='Pipeline ${CI_PIPELINE_ID}'
+    - export triggered_by="triggered by ${GITLAB_USER_NAME} has"
+  after_script:
+    - echo "Done with notification"
+  tags:
+    - php_unit
+  except:
+    - schedules
+    - triggers
+Notify_fail:
+  <<: *notify
+  when: on_failure
+  script:
+    - notice_txt="${pipeline_txt} ${triggered_by} failed. ${additional_txt}"
+    - fall_back_txt="${fall_back_txt} ${triggered_by} failed. ${additional_txt}"
+    #need to use escape characters so the command will run without trying to execute it first.
+    - curl -x 10.168.1.114:3128 -X POST -H 'Content-type:application/json'
+        --data "{\"text\":\"${header_txt}\",\"attachments\":[{\"fallback\":\"${fall_back_txt}\",\"text\":\"${notice_txt}\",\"color\":\"danger\"}]}"
+        https://hooks.slack.com/services/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
+Notify_pass:
+  <<: *notify
+  when: on_success
+  script:
+    - notice_txt="${pipeline_txt} ${triggered_by} passed. ${additional_txt}"
+    - fall_back_txt="${fall_back_txt} ${triggered_by} passed. ${additional_txt}"
+    #need to use escape characters so the command will run without trying to execute it first.
+    - curl -x 10.168.1.114:3128 -X POST -H 'Content-type:application/json'
+        --data "{ \"text\":\"${header_txt}\",\"attachments\":[{\"fallback\":\"${fall_back_txt}\",\"text\":\"${notice_txt}\",\"color\":\"good\"}]}"
+        https://hooks.slack.com/services/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
+#====================================================================#
+# general After script for any job without one.                      #
+#====================================================================#
+after_script:
+    - echo "All done"
