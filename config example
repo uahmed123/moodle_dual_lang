@@ -1,0 +1,128 @@
+<?php  // Moodle configuration file
+
+unset($CFG);
+global $CFG;
+$CFG = new stdClass();
+
+$CFG->dbtype    = 'mariadb';
+$CFG->dblibrary = 'native';
+$CFG->dbhost    = 'localhost';
+$CFG->dbname    = 'moodle';
+$CFG->dbuser    = 'root';
+$CFG->dbpass    = '';
+$CFG->prefix    = 'mdl_';
+$CFG->dboptions = array (
+  'dbpersist' => 0,
+  'dbport' => 3306,
+  'dbsocket' => '',
+  'dbcollation' => 'utf8mb4_unicode_ci',
+);
+
+$CFG->wwwroot   = 'http://10.168.2.81/moodle';
+$CFG->dataroot  = 'C:\xampp\moodledata';
+$CFG->admin     = 'admin';
+$CFG->directorypermissions = 0777;
+
+
+
+//$CFG->behat_wwwroot = 'http://localhost/moodle';
+//$CFG->behat_prefix = 'bht_';
+//$CFG->behat_dataroot = 'C:\xampp\bht_moodledata';
+
+
+
+//$CFG->behat_profiles = [
+//       'default' => [
+//           'browser' => 'chrome',
+//               'extensions' => [
+//                   'Behat\MinkExtension' => [
+//                       'selenium2' => [
+//                           'browser' => 'chrome',
+//                       ]
+//                   ]
+//               ]
+//           ]
+//       ];
+// =========================================================================
+// 9. PHPUNIT SUPPORT
+// =========================================================================
+$CFG->phpunit_prefix = 'phpu_';
+$CFG->phpunit_dataroot = 'C:\xampp\phpu_moodledata';
+$CFG->phpunit_directorypermissions = 02777; // optional
+$CFG->phpunit_profilingenabled = true;
+$CFG->proxyhost = '10.168.1.114';
+$CFG->proxyport = '3128';
+$CFG->proxytype = 'HTTP';
+$CFG->proxybypass = '10.168.1.114,10.168.2.132,localhost,127.0.0.1,.ice.dhs.gov,10.168.2.253,10.168.2.81,gitlabnonprod.sevismod.ice.dhs.gov';
+// optional to profile PHPUnit runs.
+// =========================================================================
+// 11. BEHAT SUPPORT
+// =========================================================================
+// Behat test site needs a unique www root, data directory
+// and database prefix:
+//
+
+$CFG->behat_wwwroot = 'http://localhost/moodle';
+$CFG->behat_dataroot = 'C:\xampp\bht_moodledata';
+$CFG->behat_faildump_path = 'C:\xampp\behatfaildumps';
+$CFG->behat_prefix = 'bht_';
+// We need this for CI/CD where we set run numbers.
+$run = '';
+$run = getenv('RUN', true) ?: getenv('RUN');
+$tRun = getenv('TOTAL_RUNS', true) ?: getenv('TOTAL_RUNS');
+$base_url = $CFG->behat_wwwroot;
+
+// Have to leave parallel run stuff in here, because it will cause single run to mess up.
+if ($run) {
+    /*
+     * most we will ever have is 10 but we are only running one at once, so this should work.
+     * in other words, I'm trying to force it to use the defaults, because we will not be doing more then
+     * one per runner.
+     */
+    for ($i = 1; $i <= 10; $i++) {
+        $configs[] = array(
+            'behat_wwwroot' => $CFG->behat_wwwroot,
+            'behat_dataroot' => "C:\xampp\bht_moodledata",
+            'behat_prefix' => 'bht_',
+            'wd_host' => '',
+        );
+    }
+    $CFG->behat_parallel_run = $configs;
+}
+
+
+$CFG->behat_config = [
+    'default' => [
+        'extensions' => ['DMore\ChromeExtension\Behat\ServiceContainer\ChromeExtension' => [],
+            'Behat\MinkExtension' => ['browser_name' => 'chrome',
+                'base_url' => $base_url, 'goutte' => null, 'selenium2' => null,
+                'sessions' => [
+                    'javascript' => [
+                        // This needs to be set to localhost!!!!
+                        'chrome' => ['api_url' => 'http://127.0.0.1:9222',
+                            'download_behavior' => 'allow',
+                            'download_path' => 'C:\xampp\download',
+                            'validate_certificate' => false]
+                    ]
+                ]
+            ]
+        ]
+    ]
+];
+// =========================================================================
+// ALL DONE! To continue installation, visit your main page with a browser
+// =========================================================================
+
+
+
+
+require_once(__DIR__ . '/lib/setup.php');
+
+
+
+// There is no php closing tag in this file,
+// it is intentional because it prevents trailing whitespace problems!
+
+
+$CFG->phpunit_prefix = 'phpu_';
+$CFG->phpunit_dataroot = 'C:\\xampp\\phpu_moodledata';
